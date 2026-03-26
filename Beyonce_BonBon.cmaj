@@ -1,0 +1,66 @@
+import "std.cmaj"
+
+namespace Beyonce_BonBon
+{
+    input float  frequency = 65.41;      // MIDI note (host‑handled)
+    input float  velocity  = 0.5;        // 0..1 note‑on velocity
+    input float  gate      = 0.0;        // 0..1 note‑on (for envelopes)
+    input float  swell     = 0.8;        // 0..1 expression / swell
+    input float  filterCut = 0.6;        // 0..1 filter cutoff (brightness)
+
+    output signal<2> audio;              // stereo
+
+    let sampleRate = processor.sampleRate;
+    let t          = processor.phase / sampleRate;
+
+    // 1. Main “club‑style” saw stack (soft, full, not crunchy)
+    let detune = 0.002;  // 2 cents detune
+    let vcfq   = 0.8;    // 0.0–1.0 filter‑quality
+
+    let primary  = sin(2 * pi * frequency * t);
+    let detuneUp = sin(2 * pi * frequency * t * (1.0 + detune));
+    let detuneDn = sin(2 * pi * frequency * t * (1.0 - detune));
+    let signal   = 0.4 * (primary + detuneUp + detuneDn);
+
+    // 2. Low‑pass‑style SVF (bright, but not “retro”)
+    var fNorm = 0.05 + 0.85 * filterCut;
+    var f = 2.0 * sin(3.14159 * 0.5 * fNorm);
+    var damp = 1.0 - vcfq;
+    var z1 = 0.0;
+    var z2 = 0.0;
+    z1 = z1 + f * (signal - z1 - damp * z2);
+    z2 = z2 + f * z1;
+    signal = z2;
+
+    // 3. Envelope (tight, “vocal swell” style)
+    let a  = 0.005;   // 5 ms attack
+    let d  = 0.1;     // 100 ms decay
+    let s  = 0.7;     // 70% sustain
+    let r  = 0.08;    // 80 ms release
+
+    let attackEnv  = 1.0 - exp(-t / a);
+    let decayEnv   = 1.0 - exp(-t / d);
+    let sustainEnv = s + (1.0 - s) * exp(-t / 2.0);  // very long decay
+    let releaseEnv = exp(-t / r);
+    let env = gate * (attackEnv * decayEnv * sustainEnv * releaseEnv);
+
+    signal *= env * velocity * swell;
+
+    // 4. Soft saturation (modern‑style, not “tube”)
+    let sat = 1.3;
+    signal = tanh(signal * sat) / sat;
+
+    // 5. Slight stereo spread (no reverb, just “width”)
+    let stereoL = 0.95 * signal + 0.05 * sin(2 * pi * 440.0 * t);
+    let stereoR = 0.95 * signal + 0.05 * sin(2 * pi * 460.0 * t);
+
+    processor.process = (input) => {
+        if (note.isNoteOn())
+            gate = 1.0;
+        if (note.isNoteOff())
+            gate = 0.0;
+
+        return [stereoL, stereoR];
+    };
+}
+
