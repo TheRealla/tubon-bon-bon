@@ -1,0 +1,138 @@
+import "std.cmaj"
+
+namespace Tubon_BonBon
+{
+    input float  frequency       = 65.41;    // host MIDI note
+    input float  gate            = 0.0;      // 0..1 note‑on
+    input float  velocity        = 0.5;      // 0..1 velocity
+    input float  vibratoDepth    = 0.0;      // 0..1 knob
+    input float  tilt            = 0.0;      // 0..1 motion‑tilt
+    input float  batteryLevel    = 0.8;      // 0..1 battery (drift)
+    input float  presetIndex     = 0.0;      // 0.0–4.0 → 5 presets
+
+    output signal<2> audio;
+
+    let sampleRate = processor.sampleRate;
+    let t = processor.phase / sampleRate;
+
+    struct Preset {
+        float h1;
+        float h3;
+        float h5;
+        float attackTime;
+        float saturation;
+        float noiseMix;
+        float formant;         // 0..1 mid‑boost tilt
+    };
+
+    let presets = [
+        // 0: TUBA
+        Preset {
+            h1: 1.0,
+            h3: 0.12,
+            h5: 0.18,
+            attackTime: 0.03,
+            saturation: 0.2,
+            noiseMix: 0.01,
+            formant: 0.1
+        },
+        // 1: CONTRABASS
+        Preset {
+            h1: 1.0,
+            h3: 0.18,
+            h5: 0.10,
+            attackTime: 0.012,
+            saturation: 0.15,
+            noiseMix: 0.02,
+            formant: 0.2
+        },
+        // 2: ELECTRIC BASS
+        Preset {
+            h1: 1.0,
+            h3: 0.20,
+            h5: 0.12,
+            attackTime: 0.005,
+            saturation: 0.35,
+            noiseMix: 0.01,
+            formant: 0.1
+        },
+        // 3: SAX / REED
+        Preset {
+            h1: 0.9,
+            h3: 0.20,
+            h5: 0.15,
+            attackTime: 0.01,
+            saturation: 0.1,
+            noiseMix: 0.01,
+            formant: 0.6
+        },
+        // 4: WOODWIND
+        Preset {
+            h1: 0.8,
+            h3: 0.18,
+            h5: 0.12,
+            attackTime: 0.02,
+            saturation: 0.08,
+            noiseMix: 0.10,
+            formant: 0.3
+        }
+    ];
+
+    let idx = clamp(floor(presetIndex), 0.0, 4.0);
+    let p = presets[idx];
+
+    // 1. Drift / battery / microtonal
+    let detune = 0.001;                        // 1 cent base
+    let drift = 0.003 * sin(2 * pi * 0.03 * t);
+    let battDrift = 0.004 * (1.0 - batteryLevel);
+    let tunedFreq = frequency * (1.0 + (detune + 300 * drift + 500 * battDrift) / 1200.0);
+
+    // 2. Harmonic stack
+    let fundamental = sin(2 * pi * tunedFreq * t);
+    let h3 = p.h3 * sin(2 * pi * tunedFreq * t * 3.0);
+    let h5 = p.h5 * sin(2 * pi * tunedFreq * t * 5.0);
+    let signal = p.h1 * fundamental + h3 + h5;
+
+    // 3. Envelope with “key bounce”
+    let bounce = (random(0.0, 1.0) - 0.5) * 0.003;
+    let attackRate = 1.0 / (p.attackTime + bounce);
+    let attackEnv = 1.0 - exp(-t * attackRate);
+    signal = signal * attackEnv;
+
+    // 4. Volume inconsistency per note
+    let volOffset = 1.0 + (random(0.98, 1.05) - 1.0);
+    signal = signal * volOffset * gate * velocity;
+
+    // 5. Transistor saturation
+    let sat = 1.0 + p.saturation * (velocity > 0.7 ? 1.0 : 0.0);
+    signal = tanh(signal * sat) / sat;
+
+    // 6. Vibrato + tilt
+    let vibRate = 5.5 + 0.5 * sin(2 * pi * 0.4 * t);
+    let vibMod = 0.006 + 0.004 * sin(2 * pi * 0.3 * t);
+    let vibrato = tilt * p.formant * vibMod * sin(2 * pi * vibRate * t);
+    let finalFreq = tunedFreq * (1.0 + vibrato * min(vibratoDepth, 1.0));
+    let finalSignal = sin(2 * pi * finalFreq * t) * abs(signal);
+
+    // 7. Mid boost + gentle high‑cut
+    let midBoost = 1.0 + p.formant * 0.8;
+    let highCut  = 1.0 - p.formant * 0.5;   // 4–6 kHz roll‑off
+    let formantSig = finalSignal * midBoost * highCut;
+
+    // 8. Noise / hum
+    let noise = random(-1.0, 1.0) * 0.1 * (p.noiseMix + 0.01 * tilt);
+    let hum   = 0.001 * sin(2 * pi * 58.0 * t + 0.5);
+    let noisy = formantSig + noise + hum;
+
+    // 9. Master limiting
+    let out = clamp(noisy * 1.08, -0.92, 0.92);
+
+    processor.process = (input) => {
+        if (note.isNoteOn())
+            gate = 1.0;
+        if (note.isNoteOff())
+            gate = 0.0;
+
+        return [out, out];
+    };
+}
